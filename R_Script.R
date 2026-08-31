@@ -1,16 +1,19 @@
-
 setwd("...") # Replace directory 
 
 library(readxl);library(dplyr);library(tidyverse);library(corrplot)
 library(MASS);library(broom);library(broom.helpers);library(gtsummary);library(modelsummary)
-library(kableExtra);library(car);library(lmtest);library(leaps); library(faraway)
+library(kableExtra);library(car);library(lmtest);library(leaps);require(faraway)
 library(sandwich);library(effectsize);library(parameters);library(performance)
-library(standardize);library(writexl);library(openxlsx);library(ggplot2)
-library(ggpmisc);library(patchwork); 
+library(standardize);library(writexl);library(openxlsx); library(splines);library(ggplot2)
+library(ggpmisc);library(patchwork); library(robustbase)  # For robust regression
+library(MASS) # For rlm (Huber M-estimator)
+library(robustbase)  # For alternative robust regression (lmrob)
+library(broom)       # For tidy() function
+library(dplyr)
 
 
 
-Data <- read_excel("Data.xlsx")[, -8]
+Data <- read_excel("Data_label.xlsx")[, -8]
 
 png("Correlation_plots.png", width = 2000, height = 1200, res = 300)
 
@@ -33,8 +36,8 @@ corrplot(cor_matrix,
 dev.off()
 
 # Regressions analysis------
-Predictors <- c("RN_density" ,  "Comorbidity" ,  "COVID19_vacc" , "Health_ins", "Perverty_index")
-Dependent <- "COVID19_mortality"
+Predictors <- c("RNs" ,  "COMORBIDITY" ,  "COV19_VACC" , "HEALTH_INS", "POVERTY_INDEX")
+Dependent <- "COV19_M"
 
 ## Simple regressions-----
 Crude_models <-lapply(Predictors, function(var) {
@@ -48,6 +51,21 @@ Crude_models <-lapply(Predictors, function(var) {
   
 })
 crude_stats <- do.call(rbind, Crude_models)
+
+
+## Simple regression without [ND,SD,DC]
+Data_simple_sensitivity <- Data[-c(12,13, 16),]
+Crude_models_2 <-lapply(Predictors, function(var) {
+  formula <- as.formula(paste(Dependent,  "~", var))
+  model <- lm(formula, data = Data_simple_sensitivity)
+  # Extract tidy results
+  model_stats <- broom::tidy(model, conf.int = TRUE)
+  predictor_row <- model_stats[model_stats$term == var, ]
+  
+  return(predictor_row)
+  
+})
+crude_stats_2 <- do.call(rbind, Crude_models_2)
 
 
 
@@ -75,8 +93,8 @@ std_estimates <- broom::tidy(std_model_manual)
 adj_stats$std.estimate <- std_estimates$estimate
 
 
-## Partial R-squared for individual varibale-----
-#Function to compute partial R-squared
+## Partial RÂ˛ for individual varibale-----
+#Function to compute partial RÂ˛
 partial_r2 <- function(adj_Model, variable) {
   # Get the formula and data
   full_formula <- formula(adj_Model)
@@ -95,11 +113,11 @@ partial_r2 <- function(adj_Model, variable) {
   return(r2_partial)
 }
 
-# Named numeric vector of partial R-squared values
+# Named numeric vector of partial RÂ˛ values
 partial_r2_vector <- setNames(
   sapply(Predictors, function(var) partial_r2(adj_Model, var)), Predictors)
 
-#Add partial R-squared to adj_stats (skip intercept row)
+#Add partial RÂ˛ to adj_stats (skip intercept row)
 adj_stats$partial_r2[adj_stats$term != "(Intercept)"] <- partial_r2_vector
 0
 #Prepare for Excel Export
@@ -108,7 +126,7 @@ crude_stats_out <- crude_stats[, c("term", "estimate",  "std.error", "statistic"
 names(crude_stats_out) <- c("", "Beta", "SE", "t", "p-value", "CI Low.", "CI Upp.")
 
 adj_stats_out <- adj_stats[, c("term", "estimate", "std.estimate",  "std.error", "statistic", "p.value", "conf.low", "conf.high", "partial_r2")]
-names(adj_stats_out) <- c("", "Beta", "Std Beta", "SE", "t", "p-value", "CI Low.", "CI Upp.", "Partial R-squared")
+names(adj_stats_out) <- c("", "Beta", "Std Beta", "SE", "t", "p-value", "CI Low.", "CI Upp.", "Partial RÂ˛")
 
 #Export to Excel
 output_list <- list(
@@ -121,14 +139,16 @@ writexl::write_xlsx(output_list, path = "regression_report.xlsx")
 
 
 #### Model diagnostics=================================================================================
+png("diagnostic_plots.png", width = 2000, height = 1200, res = 300)
+par(mfrow = c(2,3))
 ##### Constant variance----
-{plot(fitted(adj_Model),residuals(adj_Model),main = "Homoscedasticity", xlab="Fitted",ylab="Residuals")
+p1 <- {plot(fitted(adj_Model),residuals(adj_Model),main = "Homoscedasticity", xlab="Fitted",ylab="Residuals")
   text(x = 40, y = 24, labels = paste0("Breusch-Pagan test(p-value =", round(bptest(adj_Model)$p.value,3), ")") , pos = 4, cex = 0.8, col = "blue")
   abline(h=0, col ="red")} # short-tailed (platykurtic) distribution
 bptest(adj_Model) # Stat test BP = 2.4988, df = 5, p-value = 0.7767
 
 ##### Normality----
-{qqnorm(residuals(adj_Model), main = "Normality or residuals")
+p2<- {qqnorm(residuals(adj_Model), main = "Normality or residuals")
   text(x = -2.5, y = 20, labels = paste0("Shapiro-Wilk(p-value =", round(shapiro.test(adj_Model$residuals)$p.value,3), ")"), pos = 4, cex = 0.8, col = "blue")
   qqline(residuals(adj_Model))}
 
@@ -148,7 +168,7 @@ hatv[(hatv > 0.2)]
 State <- row.names(Data)
 max(adj_Model$fitted.values)
 
-{plot(hatv, main = "Leverage")
+p3<- {plot(hatv, main = "Leverage")
   abline(h= 2*(p+1)/n, col = "red")}
 
 
@@ -163,38 +183,34 @@ P=1
 df<-n-P
 CV<-qt(0.05/(n*2),df)
 ifelse(Max_outlier >= abs(CV), "Outlier indentified!", "no outliers") # this will print whether or ntot there is 1 or more outliers
-#plot
-{plot(stud, main = "Outliers")
+
+#GrapHEALTH_INSal
+p4<- {plot(stud, main = "Outliers")
   abline(h=c(-abs(CV),0,abs(CV)), col = "red", lwd = 1)}
 
 
 ##### Influential Points----
 cooks <- cooks.distance(adj_Model)
 length(cooks)
-halfnorm(cooks, nlab = 5, 
-         labs = Data$State,
-         main ="Influential points", col = "red" )
-
+halfnorm(cooks, 0, main ="Influential points", col = "red" )
 # Plot Cook's Distance
-Data$Cooks <- cooks.distance(adj_Model)
-threshold <- 4/length(Data$Cooks)
-Data$labels <- ifelse(Data$Cooks > threshold, Data$State, NA)
-plot(cooks, type = "h",
-     yalb = "Cook's distance", 
-     xlab = "Observation index",
-     main = "Cook's Distance Plot")
 
-abline(h = 4/length(cooks), col = "red", lty = 2, lwd = 2)
-influential <- which(cooks > threshold)
-points(influential, Data$cooks[influential], col = "blue", pch = 19, cex = 1.2)
-text(x = 0.5, y = 0.09, labels = paste0("---- 4/length(cook's Dist.)"), pos = 4, cex = 0.8, col = "red")
-text(influential, Data$Cooks[influential], 
-     labels = Data$labels[influential], 
-     pos = 4, cex = 0.8, col = "red")
+p4<-{plot(cooks, main = "Cook's Distance Plot", ylab = "Cook's distance", xlab = "Observation index")
+  # Add threshold line
+  abline(h = 4/length(cooks), col = "red", lty = 2)
+  text(x = 0.5, y = 0.09, labels = paste0("---- 4/length(cook'D)"), pos = 4, cex = 0.8, col = "red")
+  # Identify influential points
+  influential <- which(cooks > 4/length(cooks))
+  # Add labels to those points
+  text(x = influential, y = cooks[influential], labels = names(cooks)[influential], pos = 4, cex = 0.8, col = "red")}
+
+dev.off()
+
+
 
 
 #Stepwise===============================================================================================
-Model0 <- lm(COVID19_mortality ~1, Data)
+Model0 <- lm(COV19_M ~1, Data)
 
 steppp <- stepAIC(Model0, 
                   scope= list(lower = Model0, upper = adj_Model),
@@ -205,30 +221,30 @@ summary(steppp)
 
 
 
-# Sensitivity analysis-=================================================================================
+# Sensitivity analysis-----=================================================================================
 
 ## Pop weight----
-Data2<- read_excel("Data.xlsx")
-Model_Pop_weighed <- lm(COVID19_mortality ~ RN_density + Perverty_index + Comorbidity + 
-                          COVID19_vacc + Health_ins , Data2[, -1],weights = Data2$Population) # model with weighted states Population 
+Data2<- read_excel("Data_label.xlsx")
+Model_Pop_weighed <- lm(COV19_M ~ RNs + POVERTY_INDEX + COMORBIDITY + 
+                          COV19_VACC + HEALTH_INS , Data2[, -1],weights = Data2$POPULATION) # model with weighted states POPULATION 
 
-## Log transform RN_density density----
-Model_Log_trans_RN <- lm(COVID19_mortality ~ log(RN_density) + Perverty_index + Comorbidity + 
-                           COVID19_vacc + Health_ins , Data[, -1])# model with weighted states Population 
+## Log transform RNs density----
+Model_Log_trans_RNs <- lm(COV19_M ~ log(RNs) + POVERTY_INDEX + COMORBIDITY + 
+                            COV19_VACC + HEALTH_INS , Data[, -1])# model with weighted states POPULATION 
 
 ## Model without DC----
-Model_no_DC <- lm(COVID19_mortality ~ RN_density + Perverty_index + Comorbidity + 
-                    COVID19_vacc + Health_ins , Data[-12, -1]) # Removing all Cook < 4/Cook' d
+Model_no_DC <- lm(COV19_M ~ RNs + POVERTY_INDEX + COMORBIDITY + 
+                    COV19_VACC + HEALTH_INS , Data[-12, -1]) # Removing all Cook < 4/Cook' d
 summary(Model_no_DC)
 
 ## Model with no influential points----Data[-c(2:HI, 12:DC, 16:SD, 36:MO, 46:WY),]-----
-Model_no_influentials <- lm(COVID19_mortality ~ RN_density + Perverty_index + Comorbidity + 
-                              COVID19_vacc + Health_ins , Data[-c(2,12,16,36,46), -1], 
+Model_no_influentials <- lm(COV19_M ~ RNs + POVERTY_INDEX + COMORBIDITY + 
+                              COV19_VACC + HEALTH_INS , Data[-c(2,12,16,36,46), -1], 
                             subset=(cooks < 4/length(cooks))) # Removing all Cook < 4/Cook' d
 
 ## Models Comparison summary-----
 Models <- list("Adjusted" = adj_Model,
-               "Log-Transformed RN_density" = Model_Log_trans_RN,
+               "Log-Transformed RNs" = Model_Log_trans_RNs,
                "No Influentials" = Model_no_influentials,
                "Without DC" = Model_no_DC,
                "Pop. weigth" = Model_Pop_weighed)
@@ -253,90 +269,34 @@ Model_comparison <- data.frame(
 writexl::write_xlsx(Model_comparison, path = "Model_comparison.xlsx")
 
 
-# Model diagnostic (RN_density) Log transform =============================================
-
-##### Constant variance----
-{plot(fitted(Model_Log_trans_RN),residuals(Model_Log_trans_RN),main = "Homoscedasticity", xlab="Fitted",ylab="Residuals")
-  text(x = 40, y = 24, labels = paste0("Breusch-Pagan test(p-value =", round(bptest(Model_Log_trans_RN)$p.value,3), ")") , pos = 4, cex = 0.8, col = "blue")
-  abline(h=0, col ="red")} # short-tailed (platykurtic) distribution
-bptest(Model_Log_trans_RN) # Stat test BP = 2.4988, df = 5, p-value = 0.7767
-
-##### Normality----
-{qqnorm(residuals(Model_Log_trans_RN), main = "Normality or residuals")
-  text(x = -2.5, y = 20, labels = paste0("Shapiro-Wilk(p-value =", round(shapiro.test(Model_Log_trans_RN$residuals)$p.value,3), ")"), pos = 4, cex = 0.8, col = "blue")
-  qqline(residuals(Model_Log_trans_RN))}
-
-##### Multicollinearity----
-#(Variance Inflation Factors)
-vif(Model_Log_trans_RN)
-
-##### Leverage(Unusual Observations)-----
-n<-nrow(Data)
-p<-length(coef(Model_Log_trans_RN))-1
-hatv <- hatvalues(Model_Log_trans_RN)
-length(Model_Log_trans_RN$residuals)
-length(hatv)
-sum(hatv)
-(hatv > 0.2)
-hatv[(hatv > 0.2)]
-State <- row.names(Data)
-max(Model_Log_trans_RN$fitted.values)
-
-{plot(hatv, main = "Leverage")
-  abline(h= 2*(p+1)/n, col = "red")}
-
-
-##### Outliers-----
-stud <- rstudent(Model_Log_trans_RN)
-sort(stud)
-Max_outlier<- stud[max(abs(stud))]  
-Max_outlier
-a<-0.05
-n<-51
-P=1
-df<-n-P
-CV<-qt(0.05/(n*2),df)
-ifelse(Max_outlier >= abs(CV), "Outlier indentified!", "no outliers") # this will print whether or ntot there is 1 or more outliers
-#plot
-{plot(stud, main = "Outliers")
-  abline(h=c(-abs(CV),0,abs(CV)), col = "red", lwd = 1)}
-
+# Model diagnostic (RN) Log transform ===============================
 
 ##### Influential Points----
-cooks <- cooks.distance(Model_Log_trans_RN)
+cooks <- cooks.distance(Model_Log_trans_RNs)
 length(cooks)
-halfnorm(cooks, nlab = 5, 
-         labs = Data$State,
-         main ="Influential points", col = "red" )
-
+halfnorm(cooks, 0, main ="Influential points", col = "red" )
 # Plot Cook's Distance
-Data$Cooks <- cooks.distance(Model_Log_trans_RN)
-threshold <- 4/length(Data$Cooks)
-Data$labels <- ifelse(Data$Cooks > threshold, Data$State, NA)
-plot(cooks, type = "h",
-     yalb = "Cook's distance", 
-     xlab = "Observation index",
-     main = "Cook's Distance Plot")
 
-abline(h = 4/length(cooks), col = "red", lty = 2, lwd = 2)
-influential <- which(cooks > threshold)
-points(influential, Data$cooks[influential], col = "blue", pch = 19, cex = 1.2)
-text(x = 0.5, y = 0.09, labels = paste0("---- 4/length(cook's Dist.)"), pos = 4, cex = 0.8, col = "red")
-text(influential, Data$Cooks[influential], 
-     labels = Data$labels[influential], 
-     pos = 4, cex = 0.8, col = "red")
+p4<-{plot(cooks, main = "Cook's Distance Plot", ylab = "Cook's distance", xlab = "Observation index")
+  # Add threshold line
+  abline(h = 4/length(cooks), col = "red", lty = 2)
+  text(x = 0.5, y = 0.09, labels = paste0("---- 4/length(cook'D)"), pos = 4, cex = 0.8, col = "red")
+  # Identify influential points
+  influential <- which(cooks > 4/length(cooks))
+  # Add labels to those points
+  text(x = influential, y = cooks[influential], labels = names(cooks)[influential], pos = 4, cex = 0.8, col = "red")}
 
 
 
 
-# Models Visualisations (Simples)===============================================================
-#Scatter Plots with Regression Lines and R-squared
+# Models Visualisations (Simples)-----
+#Scatter Plots with Regression Lines and RÂ˛
 Data_long <- Data %>% 
-  rename('Poverty Index' =Perverty_index, 'Completed COVID-19 Vaccine' = COVID19_vacc,
-         'Health Insurance Coverage' = Health_ins, Comorbidity = Comorbidity, 'RN Density' = RN_density,
-         'COVID19_mortality' = COVID19_mortality) %>% 
+  rename('Poverty Index' =POVERTY_INDEX, 'Completed COVID-19 Vaccine' = COV19_VACC,
+         'Health Insurance Coverage' = HEALTH_INS, Commorbidity = COMORBIDITY, 'RNs Density' = RNs,
+         'COV19_Mortality' = COV19_M) %>% 
   pivot_longer(
-    cols = 'RN Density':'Poverty Index',
+    cols = 'RNs Density':'Poverty Index',
     names_to = "Variables",
     values_to = "Estimate" )
 
@@ -346,7 +306,7 @@ plots <- Data_long %>%
   group_split(Variables) %>%
   lapply(function(data) {
     group_name <- unique(data$Variables)
-    ggplot(data, aes(Estimate, COVID19_mortality)) +
+    ggplot(data, aes(Estimate, COV19_Mortality)) +
       geom_point(size =0.5, col = "blue") +
       geom_text(aes(label = State), hjust = -0.2, vjust = -0.5, size = 1.4, col="blue") +  # Add ID labels
       geom_smooth(method = "lm", size = 0.5, se = FALSE, formula = formula, col= "red") +
@@ -371,9 +331,65 @@ ggsave("combined_plot.png", width = 20, height = 20, units = "cm")
 
 
 
+## Simple regression without [ND,SD,DC]
+Data_simple_sensitivity <- Data[-c(12,13, 16),]
+Crude_models_2 <-lapply(Predictors, function(var) {
+  formula <- as.formula(paste(Dependent,  "~", var))
+  model <- lm(formula, data = Data_simple_sensitivity)
+  # Extract tidy results
+  model_stats <- broom::tidy(model, conf.int = TRUE)
+  predictor_row <- model_stats[model_stats$term == var, ]
+  
+  return(predictor_row)
+  
+})
+crude_stats_2 <- do.call(rbind, Crude_models_2)
 
 
-# Overall Model Tables(Model without DC)-=====================================================
+
+
+# Simple regression sensitivity analysis (removing outliers)------
+#Scatter Plots with Regression Lines and RÂ˛
+Data_long <- Data_simple_sensitivity %>% 
+  rename('Poverty Index' =POVERTY_INDEX, 'Completed COVID-19 Vaccine' = COV19_VACC,
+         'Health Insurance Coverage' = HEALTH_INS, Commorbidity = COMORBIDITY, 'RNs Density' = RNs,
+         'COV19_Mortality' = COV19_M) %>% 
+  pivot_longer(
+    cols = 'RNs Density':'Poverty Index',
+    names_to = "Variables",
+    values_to = "Estimate" )
+
+formula <- y ~ x
+
+plots <- Data_long %>%
+  group_split(Variables) %>%
+  lapply(function(data) {
+    group_name <- unique(data$Variables)
+    ggplot(data, aes(Estimate, COV19_Mortality)) +
+      geom_point(size =0.5, col = "blue") +
+      geom_text(aes(label = State), hjust = -0.2, vjust = -0.5, size = 1.4, col="blue") +  # Add ID labels
+      geom_smooth(method = "lm", size = 0.5, se = FALSE, formula = formula, col= "red") +
+      stat_poly_eq(
+        formula = formula,
+        aes(label = paste(after_stat(eq.label),after_stat(p.value.label), after_stat(rr.label), sep = "~~~")),
+        label.x = "right",
+        label.y = "bottom"
+      ) +
+      theme_classic(base_size = 14) +
+      xlab(group_name) 
+  })
+
+# Combine plots using patchwork
+combined_plot <- wrap_plots(plots, ncol = 2) +
+  plot_annotation(title = "")
+# Display the combined plot
+print(combined_plot)
+
+ggsave("combined_plot_no_outliers.png", width = 20, height = 20, units = "cm")
+
+
+
+# Overall Model Tables(Model without DC)-------=====================================================
 Data3 <- Data[-12,]# Data without influential points 
 
 #crude estimates (juste exploratory)
@@ -409,8 +425,8 @@ std_estimates <- broom::tidy(std_model_manual)
 Model_no_DC_results$std.estimate <- std_estimates$estimate
 
 
-## Partial R-squared for individual varibale-----
-#Function to compute partial R-squared
+## Partial RÂ˛ for individual varibale-----
+#Function to compute partial RÂ˛
 partial_r2 <- function(Model_no_DC, variable) {
   # Get the formula and data
   full_formula <- formula(Model_no_DC)
@@ -424,16 +440,16 @@ partial_r2 <- function(Model_no_DC, variable) {
   sse_full <- sum(residuals(Model_no_DC)^2)
   sse_reduced <- sum(residuals(reduced_model)^2)
   
-  # Partial R-squared
+  # Partial RÂ˛
   r2_partial <- (sse_reduced - sse_full) / sse_reduced
   return(r2_partial)
 }
 
-# Named numeric vector of partial R-squared values
+# Named numeric vector of partial RÂ˛ values
 partial_r2_vector <- setNames(
   sapply(Predictors, function(var) partial_r2(Model_no_DC, var)), Predictors)
 
-#Add partial R-squared to adj_stats (skip intercept row)
+#Add partial RÂ˛ to adj_stats (skip intercept row)
 Model_no_DC_results$partial_r2[Model_no_DC_results$term != "(Intercept)"] <- partial_r2_vector
 
 ##Prepare for Excel Export----
@@ -442,14 +458,14 @@ crude_stats_no_DC_out <- crude_stats_no_DC_result[, c("term", "estimate",  "std.
 names(crude_stats_no_DC_out) <- c("", "Beta", "SE", "t", "p-value", "CI Low.", "CI Upp.")
 
 Model_no_DC_out <- Model_no_DC_results[, c("term", "estimate", "std.estimate",  "std.error", "statistic", "p.value", "conf.low", "conf.high", "partial_r2")]
-names(Model_no_DC_out) <- c("", "Beta", "Std Beta", "SE", "t", "p-value", "CI Low.", "CI Upp.", "Partial R-squared")
+names(Model_no_DC_out) <- c("", "Beta", "Std Beta", "SE", "t", "p-value", "CI Low.", "CI Upp.", "Partial RÂ˛")
 
 #Export to Excel
 output_list2 <- list(
   "Crude_Statistics" = crude_stats_no_DC_out,
   "Adjusted_Statistics" = Model_no_DC_out )
 
-# Write to Excel file
+# # Write to Excel file
 writexl::write_xlsx(output_list2, path = "regression_report_no_DC.xlsx")
 
 
@@ -495,8 +511,8 @@ std_estimates <- broom::tidy(std_model_manual)
 Model_no_influ_result$std.estimate <- std_estimates$estimate
 
 
-## Partial R-squared for individual varibale-----
-#Function to compute partial R-squared
+## Partial RÂ˛ for individual varibale-----
+#Function to compute partial RÂ˛
 partial_r2 <- function(Model_no_influentials, variable) {
   # Get the formula and data
   full_formula <- formula(Model_no_influentials)
@@ -510,16 +526,16 @@ partial_r2 <- function(Model_no_influentials, variable) {
   sse_full <- sum(residuals(Model_no_influentials)^2)
   sse_reduced <- sum(residuals(reduced_model)^2)
   
-  # Partial R-squared
+  # Partial RÂ˛
   r2_partial <- (sse_reduced - sse_full) / sse_reduced
   return(r2_partial)
 }
 
-# Named numeric vector of partial R-squared values
+# Named numeric vector of partial RÂ˛ values
 partial_r2_vector <- setNames(
   sapply(Predictors, function(var) partial_r2(Model_no_influentials, var)), Predictors)
 
-#Add partial R-squared to adj_stats (skip intercept row)
+#Add partial RÂ˛ to adj_stats (skip intercept row)
 Model_no_influ_result$partial_r2[Model_no_influ_result$term != "(Intercept)"] <- partial_r2_vector
 
 ##Prepare for Excel Export----
@@ -528,7 +544,7 @@ crude_stats_no_influentials_out <- crude_stats_no_influ_result[, c("term", "esti
 names(crude_stats_no_influentials_out) <- c("", "Beta", "SE", "t", "p-value", "CI Low.", "CI Upp.")
 
 Model_no_influentials_out <- Model_no_influ_result[, c("term", "estimate", "std.estimate",  "std.error", "statistic", "p.value", "conf.low", "conf.high", "partial_r2")]
-names(Model_no_influentials_out) <- c("", "Beta", "Std Beta", "SE", "t", "p-value", "CI Low.", "CI Upp.", "Partial R-squared")
+names(Model_no_influentials_out) <- c("", "Beta", "Std Beta", "SE", "t", "p-value", "CI Low.", "CI Upp.", "Partial RÂ˛")
 
 #Export to Excel
 output_list2 <- list(
